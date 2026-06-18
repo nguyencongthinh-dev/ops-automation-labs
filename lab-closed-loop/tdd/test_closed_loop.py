@@ -77,19 +77,41 @@ class TestDecisionValidation(unittest.TestCase):
         cfg = {
             "runbook_registry": [
                 "runbooks/restart_service.sh",
-                "runbooks/clear_cache.sh"
+                "runbooks/clear_cache.sh",
             ]
         }
         # Valid runbooks
-        self.assertTrue(closed_loop.validate_runbook("runbooks/restart_service.sh", cfg, "AlertA", "runbooks/restart_service.sh"))
-        self.assertTrue(closed_loop.validate_runbook("runbooks/clear_cache.sh", cfg, "AlertB", "runbooks/clear_cache.sh"))
-        
+        self.assertTrue(
+            closed_loop.validate_runbook(
+                "runbooks/restart_service.sh",
+                cfg,
+                "AlertA",
+                "runbooks/restart_service.sh",
+            )
+        )
+        self.assertTrue(
+            closed_loop.validate_runbook(
+                "runbooks/clear_cache.sh", cfg, "AlertB", "runbooks/clear_cache.sh"
+            )
+        )
+
         # Valid runbook with arguments
-        self.assertTrue(closed_loop.validate_runbook("runbooks/restart_service.sh --step-a", cfg, "AlertA", "runbooks/restart_service.sh --step-a"))
+        self.assertTrue(
+            closed_loop.validate_runbook(
+                "runbooks/restart_service.sh --step-a",
+                cfg,
+                "AlertA",
+                "runbooks/restart_service.sh --step-a",
+            )
+        )
 
         # Invalid runbook (hallucination defense)
-        with patch.object(closed_loop.log, 'error') as mock_log:
-            self.assertFalse(closed_loop.validate_runbook("runbooks/nonexistent.sh", cfg, "AlertC", "runbooks/nonexistent.sh"))
+        with patch.object(closed_loop.log, "error") as mock_log:
+            self.assertFalse(
+                closed_loop.validate_runbook(
+                    "runbooks/nonexistent.sh", cfg, "AlertC", "runbooks/nonexistent.sh"
+                )
+            )
             mock_log.assert_called_once()
             self.assertEqual(mock_log.call_args[0][0], "DECISION_VALIDATION_FAILED")
 
@@ -99,7 +121,9 @@ class TestTransactionalSteps(unittest.TestCase):
     def test_transactional_steps_success(self, mock_run):
         mock_run.return_value = True
         steps = ["step-a", "step-b", "step-c"]
-        success, completed = closed_loop.run_transactional_steps(steps, "svc-a", False, 30)
+        success, completed = closed_loop.run_transactional_steps(
+            steps, "svc-a", False, 30
+        )
         self.assertTrue(success)
         self.assertEqual(completed, steps)
         self.assertEqual(mock_run.call_count, 3)
@@ -109,7 +133,9 @@ class TestTransactionalSteps(unittest.TestCase):
         # First step succeeds, second fails, third not executed
         mock_run.side_effect = [True, False]
         steps = ["step-a", "step-b", "step-c"]
-        success, completed = closed_loop.run_transactional_steps(steps, "svc-a", False, 30)
+        success, completed = closed_loop.run_transactional_steps(
+            steps, "svc-a", False, 30
+        )
         self.assertFalse(success)
         self.assertEqual(completed, ["step-a"])
         self.assertEqual(mock_run.call_count, 2)
@@ -127,7 +153,7 @@ class TestServiceMutex(unittest.TestCase):
 
         cfg = {
             "runbook_map": {"HighLatency": "runbooks/restart_service.sh"},
-            "runbook_registry": ["runbooks/restart_service.sh"]
+            "runbook_registry": ["runbooks/restart_service.sh"],
         }
         baseline = {}
         guard = MagicMock()
@@ -137,7 +163,10 @@ class TestServiceMutex(unittest.TestCase):
         alert = {"labels": {"alertname": "HighLatency", "service": "payment-svc"}}
 
         # Start thread 1
-        t1 = threading.Thread(target=closed_loop.process_alert, args=(alert, cfg, baseline, guard, cb, False))
+        t1 = threading.Thread(
+            target=closed_loop.process_alert,
+            args=(alert, cfg, baseline, guard, cb, False),
+        )
         t1.start()
         time.sleep(0.1)  # Allow thread 1 to acquire lock
 
@@ -147,7 +176,9 @@ class TestServiceMutex(unittest.TestCase):
         t1.join()
 
         # Assert SERVICE_LOCK_BUSY was logged
-        busy_calls = [c for c in mock_log.warning.call_args_list if c[0][0] == "SERVICE_LOCK_BUSY"]
+        busy_calls = [
+            c for c in mock_log.warning.call_args_list if c[0][0] == "SERVICE_LOCK_BUSY"
+        ]
         self.assertEqual(len(busy_calls), 1)
 
     @patch("closed_loop._process_alert_locked")
@@ -155,7 +186,7 @@ class TestServiceMutex(unittest.TestCase):
     def test_independent_services_do_not_block(self, mock_log, mock_locked):
         cfg = {
             "runbook_map": {"HighLatency": "runbooks/restart_service.sh"},
-            "runbook_registry": ["runbooks/restart_service.sh"]
+            "runbook_registry": ["runbooks/restart_service.sh"],
         }
         baseline = {}
         guard = MagicMock()
@@ -169,7 +200,9 @@ class TestServiceMutex(unittest.TestCase):
         closed_loop.process_alert(alert1, cfg, baseline, guard, cb, False)
         closed_loop.process_alert(alert2, cfg, baseline, guard, cb, False)
 
-        busy_calls = [c for c in mock_log.warning.call_args_list if c[0][0] == "SERVICE_LOCK_BUSY"]
+        busy_calls = [
+            c for c in mock_log.warning.call_args_list if c[0][0] == "SERVICE_LOCK_BUSY"
+        ]
         self.assertEqual(len(busy_calls), 0)
 
 
@@ -190,14 +223,14 @@ class TestVerifyAndRollback(unittest.TestCase):
             "prometheus_url": "http://localhost:9090",
             "blast_radius": {
                 "max_actions_per_minute": 3,
-                "max_restarts_per_service_per_hour": 5
-            }
+                "max_restarts_per_service_per_hour": 5,
+            },
         }
         baseline = {
             "verify_thresholds": {
                 "verify_timeout_seconds": 10,
                 "verify_poll_interval_seconds": 2,
-                "verify_min_samples": 2
+                "verify_min_samples": 2,
             }
         }
         guard = MagicMock()
@@ -212,11 +245,15 @@ class TestVerifyAndRollback(unittest.TestCase):
             baseline=baseline,
             guard=guard,
             cb=cb,
-            global_dry_run=False
+            global_dry_run=False,
         )
 
         # Should log ROLLBACK_TRIGGERED and execute rollback runbook
-        rb_triggered = [c for c in mock_log.warning.call_args_list if c[0][0] == "ROLLBACK_TRIGGERED"]
+        rb_triggered = [
+            c
+            for c in mock_log.warning.call_args_list
+            if c[0][0] == "ROLLBACK_TRIGGERED"
+        ]
         self.assertEqual(len(rb_triggered), 1)
         cb.record_failure.assert_called_once()
 

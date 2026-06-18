@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import os
 
+
 class JsonLogger:
     """Emit structured JSON log records to stdout and optionally to a file."""
 

@@ -28,7 +28,10 @@ class BlastRadiusGuard:
         if len(self._global_window) >= self._max_per_minute:
             return False, f"global actions/min limit ({self._max_per_minute}) reached"
         if len(self._service_window[service]) >= self._max_restarts_per_hour:
-            return False, f"restarts/hour limit ({self._max_restarts_per_hour}) for {service}"
+            return (
+                False,
+                f"restarts/hour limit ({self._max_restarts_per_hour}) for {service}",
+            )
         return True, "ok"
 
     def record(self, service: str):
