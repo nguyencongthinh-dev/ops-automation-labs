@@ -39,9 +39,8 @@ jobs:
           uv run bandit -r lab-closed-loop/tdd/ -x lab-closed-loop/tdd/test_closed_loop.py
 
       - name: Run ShellCheck on Runbooks
-        uses: koalaman/shellcheck-action@v2
-        with:
-          path: lab-closed-loop/tdd/runbooks
+        run: |
+          shellcheck lab-closed-loop/tdd/runbooks/*.sh
 
   test:
     name: Unit Tests & Coverage
