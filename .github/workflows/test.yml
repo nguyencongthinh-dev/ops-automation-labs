@@ -1,4 +1,4 @@
-name: Closed-Loop Orchestrator CI
+name: Closed-Loop Orchestrator CI/CD
 
 on:
   push:
@@ -7,13 +7,9 @@ on:
     branches: [ main, master ]
 
 jobs:
-  test:
-    name: Run Python Unit Tests
+  lint:
+    name: Code Quality & Security Scan
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: lab-closed-loop
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,6 +19,51 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install uv and tools
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: 'latest'
+
+      - name: Run Ruff Linter
+        run: |
+          uv pip install ruff
+          uv run ruff check lab-closed-loop/tdd
+
+      - name: Run Ruff Formatter Check
+        run: |
+          uv run ruff format --check lab-closed-loop/tdd
+
+      - name: Run Security Scan (Bandit)
+        run: |
+          uv pip install bandit
+          uv run bandit -r lab-closed-loop/tdd/ -x lab-closed-loop/tdd/test_closed_loop.py
+
+      - name: Run ShellCheck on Runbooks
+        uses: koalaman/shellcheck-action@v2
+        with:
+          path: lab-closed-loop/tdd/runbooks
+
+  test:
+    name: Unit Tests & Coverage
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    defaults:
+      run:
+        working-directory: lab-closed-loop
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -31,8 +72,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements.txt pytest pytest-cov
 
-      - name: Run unit tests
+      - name: Run tests with coverage
         run: |
-          python -m unittest tdd/test_closed_loop.py
+          python -m pytest tdd/test_closed_loop.py --cov=tdd --cov-report=term-missing
