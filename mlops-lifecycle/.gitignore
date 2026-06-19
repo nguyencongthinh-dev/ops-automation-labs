@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# MLflow
+mlruns/
+mlflow.db
+
+# Lab outputs (generated at runtime, not tracked in git)
+outputs/
+
+# Test coverage
+.coverage
+coverage.xml
+.pytest_cache/
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

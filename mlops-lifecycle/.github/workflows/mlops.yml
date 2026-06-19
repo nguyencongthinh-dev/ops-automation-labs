@@ -1,0 +1,339 @@
+name: MLOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "thinh/**"
+      - ".github/workflows/mlops.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "thinh/**"
+  workflow_dispatch:
+    inputs:
+      run_training:
+        description: "Run model training after tests pass?"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      use_optuna:
+        description: "Use Optuna AutoML tuning during training?"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      n_trials:
+        description: "Number of Optuna trials (only used when use_optuna=true)"
+        required: false
+        default: "20"
+
+env:
+  MLFLOW_TRACKING_URI: http://localhost:5000
+  PYTHONPATH: ${{ github.workspace }}/thinh
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Lint + Static Analysis
+  # ─────────────────────────────────────────────────────────────────────────
+  lint:
+    name: "Lint & Static Analysis"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linting tools
+        run: pip install ruff
+
+      - name: Lint with Ruff
+        # E=pycodestyle errors, F=pyflakes, W=warnings, I=isort
+        # E501 (line too long) ignored - not critical for lab
+        run: |
+          ruff check thinh/ --select=E,F,W,I --ignore=E501,E402
+          echo "Lint passed!"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Unit Tests
+  # Tests run from repo root so pytest.ini filterwarnings applies correctly.
+  # -W error::FutureWarning only — DeprecationWarning from mlflow/evidently
+  # is suppressed via pytest.ini to avoid third-party false failures.
+  # ─────────────────────────────────────────────────────────────────────────
+  test:
+    name: "Unit Tests"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        # evidently 0.4.x API (metric_preset, Report(metrics=[...]), drift_by_columns)
+        # -- code uses old API removed in evidently 1.0+. Pin 0.4.30 + numpy<2
+        # (0.4.x relies on np.float_, removed in numpy 2.0).
+        run: |
+          uv pip install --system \
+            mlflow scikit-learn "pandas>=2.0,<2.4" "numpy<2" \
+            "evidently==0.4.30" \
+            fastapi uvicorn prometheus-client httpx \
+            optuna pytest pytest-cov
+
+      - name: Run Unit Tests with Coverage
+        # Run from repo root so pytest.ini is picked up automatically
+        run: |
+          pytest thinh/test_pipeline.py -v \
+            --tb=short \
+            --cov=thinh \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -W error::FutureWarning
+
+      - name: Upload Coverage Report
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Integration Test (Drift Detection)
+  # Generates synthetic data in /tmp and runs drift_detector.py in data-only
+  # mode (no MLflow needed). Exit code 0 or 1 both acceptable (|| true).
+  # ─────────────────────────────────────────────────────────────────────────
+  integration-drift:
+    name: "Integration: Drift Detection"
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        # Same evidently 0.4.x pin as the test job (see comment there).
+        run: |
+          uv pip install --system \
+            mlflow scikit-learn "pandas>=2.0,<2.4" "numpy<2" \
+            "evidently==0.4.30" optuna prometheus-client
+
+      - name: Create output directories
+        run: mkdir -p outputs/drift_reports
+
+      - name: Generate test data
+        run: |
+          python -c "
+          import pandas as pd
+          import numpy as np
+          np.random.seed(42)
+          n = 200
+          df_ref = pd.DataFrame({
+              'timestamp': pd.date_range('2026-01-01', periods=n, freq='10min'),
+              'latency_p99': np.random.normal(120, 5, n),
+              'error_rate': np.clip(np.random.normal(0.02, 0.005, n), 0, 1),
+              'rps': np.random.normal(450, 20, n)
+          })
+          df_ref.to_csv('/tmp/baseline.csv', index=False)
+          df_cur = pd.DataFrame({
+              'timestamp': pd.date_range('2026-02-01', periods=n, freq='10min'),
+              'latency_p99': np.random.normal(300, 30, n),
+              'error_rate': np.clip(np.random.normal(0.15, 0.03, n), 0, 1),
+              'rps': np.random.normal(200, 30, n)
+          })
+          df_cur.to_csv('/tmp/drifted.csv', index=False)
+          print('Test data generated: baseline=%d rows, drifted=%d rows' % (len(df_ref), len(df_cur)))
+          "
+
+      - name: Run drift detection (data-only mode)
+        # Exit code 1 means drift detected — both 0 and 1 are valid outcomes
+        run: |
+          python thinh/drift_detector.py \
+            --reference /tmp/baseline.csv \
+            --current   /tmp/drifted.csv \
+            --threshold 0.15 \
+            --check-mode data || true
+          echo "Drift detection integration test complete."
+
+      - name: Verify HTML report was saved
+        run: |
+          REPORT=$(ls outputs/drift_reports/drift-report-*.html 2>/dev/null | head -1)
+          if [ -z "$REPORT" ]; then
+            echo "ERROR: No HTML report found in outputs/drift_reports/"
+            exit 1
+          fi
+          echo "HTML report found: $REPORT"
+          JSON=$(ls outputs/drift_reports/drift-summary-*.json 2>/dev/null | head -1)
+          if [ -z "$JSON" ]; then
+            echo "ERROR: No summary JSON found in outputs/drift_reports/"
+            exit 1
+          fi
+          echo "Summary JSON found: $JSON"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 4: API Schema Validation
+  # Validates Pydantic business constraints directly without starting FastAPI.
+  # Must install prometheus-client because serve.py imports it at module level.
+  # ─────────────────────────────────────────────────────────────────────────
+  api-schema-check:
+    name: "API Schema & Validation Check"
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # prometheus-client REQUIRED: serve.py imports it at module level
+        run: |
+          pip install fastapi pydantic uvicorn prometheus-client mlflow numpy
+
+      - name: Validate Pydantic schemas
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, 'thinh')
+          from serve import PredictRequest, FeatureRow
+          from pydantic import ValidationError
+
+          # Test 1: Valid request (structured)
+          req = PredictRequest(features=[{'latency_p99': 120.0, 'error_rate': 0.01, 'rps': 450.0}])
+          assert len(req.features) == 1
+          print('PASS: valid structured request')
+
+          # Test 2: Valid request (raw matrix)
+          req2 = PredictRequest(features=[[120.0, 0.01, 450.0]])
+          assert len(req2.features) == 1
+          print('PASS: valid raw matrix request')
+
+          # Test 3: Invalid latency (negative)
+          try:
+              FeatureRow(latency_p99=-1.0, error_rate=0.01, rps=450.0)
+              assert False, 'Should have raised'
+          except ValidationError:
+              print('PASS: negative latency rejected')
+
+          # Test 4: Invalid error_rate (>1)
+          try:
+              FeatureRow(latency_p99=120.0, error_rate=1.5, rps=450.0)
+              assert False, 'Should have raised'
+          except ValidationError:
+              print('PASS: error_rate > 1 rejected')
+
+          # Test 5: Invalid rps (negative)
+          try:
+              FeatureRow(latency_p99=120.0, error_rate=0.01, rps=-5.0)
+              assert False, 'Should have raised'
+          except ValidationError:
+              print('PASS: negative rps rejected')
+
+          # Test 6: Empty features list
+          try:
+              PredictRequest(features=[])
+              assert False, 'Should have raised'
+          except ValidationError:
+              print('PASS: empty features list rejected')
+
+          print('All schema validation checks passed!')
+          "
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 5: Training (Manual Trigger Only)
+  # Requires workflow_dispatch with run_training=true.
+  # Starts a local MLflow server, trains model, verifies registry alias.
+  # ─────────────────────────────────────────────────────────────────────────
+  train:
+    name: "Model Training"
+    runs-on: ubuntu-latest
+    needs: [test, integration-drift, api-schema-check]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.run_training == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        # Same numpy<2 pin as the test job (pipeline.py itself doesn't import
+        # evidently, but other modules in thinh/ do, and mlflow/pandas can pull
+        # numpy 2.x which breaks them).
+        run: |
+          uv pip install --system \
+            mlflow scikit-learn "pandas>=2.0,<2.4" "numpy<2" optuna prometheus-client
+
+      - name: Start MLflow server (background)
+        run: |
+          mlflow server --host 127.0.0.1 --port 5000 --backend-store-uri sqlite:///mlflow.db &
+          sleep 8
+          curl -s http://127.0.0.1:5000/health || echo "MLflow health check failed"
+          echo "MLflow server started."
+
+      - name: Generate baseline data
+        run: |
+          python -c "
+          import pandas as pd, numpy as np, os
+          np.random.seed(42)
+          n = 500
+          df = pd.DataFrame({
+              'timestamp': pd.date_range('2026-01-01', periods=n, freq='10min'),
+              'latency_p99': np.random.normal(120, 5, n),
+              'error_rate': np.clip(np.random.normal(0.02, 0.005, n), 0, 1),
+              'rps': np.random.normal(450, 20, n)
+          })
+          os.makedirs('data', exist_ok=True)
+          df.to_csv('data/baseline.csv', index=False)
+          print(f'Generated {len(df)} rows -> data/baseline.csv')
+          "
+
+      - name: Train model (with optional Optuna tuning)
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+        run: |
+          OPTUNA_FLAG=""
+          if [ "${{ github.event.inputs.use_optuna }}" = "true" ]; then
+            OPTUNA_FLAG="--tune --n-trials ${{ github.event.inputs.n_trials }}"
+          fi
+          python thinh/pipeline.py --data data/baseline.csv $OPTUNA_FLAG
+          echo "Training complete."
+
+      - name: Verify model registered in MLflow
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+        run: |
+          python -c "
+          import mlflow
+          client = mlflow.MlflowClient()
+          versions = client.search_model_versions(\"name='anomaly-detector'\")
+          print(f'Registered versions: {[v.version for v in versions]}')
+          alias_mv = client.get_model_version_by_alias('anomaly-detector', 'production')
+          print(f'Production alias -> v{alias_mv.version}')
+          assert alias_mv is not None, 'Production alias not set!'
+          print('Model registration verification PASSED.')
+          "
